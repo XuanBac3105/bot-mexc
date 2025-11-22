@@ -1166,14 +1166,31 @@ async def restart_bot_at_specific_times():
 async def fetch_coin_list_schedule(session):
     """Lấy lịch coin list từ API và trả về danh sách thời gian list (giờ VN)."""
     url = f"{FUTURES_BASE}/api/v1/contract/coinlist"  # Giả sử đây là endpoint lấy lịch coin list
-    data = await fetch_json(session, url)
-    
-    # Giả sử API trả về danh sách các coin với thời gian list dạng timestamp
+
+    # Một số endpoint có thể không tồn tại (404) hoặc trả về format khác.
+    # Bắt mọi lỗi ở đây và trả về danh sách rỗng để không làm crash toàn bộ bot.
+    try:
+        data = await fetch_json(session, url)
+    except Exception as e:
+        print(f"❌ fetch_coin_list_schedule: failed to fetch {url}: {e}")
+        return []
+
+    # Nếu data không phải dict hoặc không có key 'coins', trả về rỗng
+    if not isinstance(data, dict):
+        return []
+
     schedules = []
     for coin in data.get("coins", []):
-        list_time = datetime.fromtimestamp(coin["list_time"], pytz.utc).astimezone(pytz.timezone("Asia/Ho_Chi_Minh"))
-        schedules.append(list_time)
-    
+        try:
+            # Nhiều API trả field timestamp khác nhau; bảo vệ bằng try/except
+            ts = coin.get("list_time") or coin.get("firstOpenTime") or coin.get("timestamp")
+            if not ts:
+                continue
+            list_time = datetime.fromtimestamp(ts, pytz.utc).astimezone(pytz.timezone("Asia/Ho_Chi_Minh"))
+            schedules.append(list_time)
+        except Exception:
+            continue
+
     return schedules
 
 async def schedule_restarts_based_on_coin_list():
