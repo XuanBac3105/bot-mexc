@@ -3,6 +3,7 @@ import sys
 import asyncio
 import json
 import pickle
+from telegram import BotCommand
 from datetime import datetime, timedelta
 
 import aiohttp
@@ -801,32 +802,25 @@ async def post_init(application: Application):
         name="new_listing",
     )
 
+    # ================================
+    # 🔥 THÊM MENU LỆNH Ở ĐÂY
+    # ================================
+    await application.bot.set_my_commands([
+        BotCommand("start", "Bắt đầu & xem hướng dẫn"),
+        BotCommand("subscribe", "Bật thông báo"),
+        BotCommand("unsubscribe", "Tắt thông báo"),
+        BotCommand("mode1", "Báo tất cả (3–5% + ≥10%)"),
+        BotCommand("mode2", "Chỉ báo 3–5%"),
+        BotCommand("mode3", "Chỉ báo ≥10%"),
+        BotCommand("mute", "Tắt thông báo 1 coin"),
+        BotCommand("unmute", "Bật lại thông báo 1 coin"),
+        BotCommand("mutelist", "Danh sách coin bị mute"),
+        BotCommand("timelist", "Coin sắp list 7 ngày tới"),
+        BotCommand("coinlist", "Coin đã list 7 ngày qua"),
+    ])
+    # ================================
+
     print("✅ post_init hoàn tất – bot sẵn sàng quét MEXC Futures realtime")
-
-
-def main():
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    # command handlers
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("subscribe", cmd_subscribe))
-    application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
-    application.add_handler(CommandHandler("mode1", cmd_mode1))
-    application.add_handler(CommandHandler("mode2", cmd_mode2))
-    application.add_handler(CommandHandler("mode3", cmd_mode3))
-    application.add_handler(CommandHandler("mute", cmd_mute))
-    application.add_handler(CommandHandler("unmute", cmd_unmute))
-    application.add_handler(CommandHandler("mutelist", cmd_mutelist))
-    application.add_handler(CommandHandler("timelist", cmd_timelist))
-    application.add_handler(CommandHandler("coinlist", cmd_coinlist))
-
-    print("🔥 Bot MEXC Futures Alert đang chạy…")
-    application.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
