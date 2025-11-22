@@ -25,7 +25,13 @@ load_dotenv()
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")  # ID của channel (ví dụ: -1001234567890 hoặc @channel_name)
+# OWNER_ID: chỉ định 1 user (user id) là chủ bot — bot chỉ phục vụ user này khi set
+OWNER_ID = int(os.getenv("OWNER_ID")) if os.getenv("OWNER_ID") else None
+
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else set()  # Admin user IDs
+# Nếu OWNER_ID được set, đảm bảo OWNER_ID luôn là admin
+if OWNER_ID:
+    ADMIN_IDS.add(OWNER_ID)
 
 FUTURES_BASE = "https://contract.mexc.co"
 WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # MEXC Futures WebSocket endpoint
@@ -92,7 +98,10 @@ def load_data():
         ALERT_MODE = data.get("alert_mode", {})
         MUTED_COINS = data.get("muted_coins", {})
         KNOWN_SYMBOLS = data.get("known_symbols", set())
-        
+        # Nếu OWNER_ID được cấu hình, buộc chỉ một subscriber là OWNER_ID
+        if OWNER_ID is not None:
+            SUBSCRIBERS = {OWNER_ID}
+
         print(f"✅ Đã tải dữ liệu: {len(SUBSCRIBERS)} subscribers, {len(KNOWN_SYMBOLS)} coins")
     except Exception as e:
         print(f"⚠️ Lỗi tải dữ liệu: {e}")
@@ -204,11 +213,24 @@ def admin_only(func):
     """Decorator để giới hạn command chỉ cho admin"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        
+        # Nếu OWNER_ID đã được set → chỉ OWNER_ID mới được phép
+        if OWNER_ID is not None:
+            if user_id != OWNER_ID:
+                msg = (
+                    "⛔ Lệnh này chỉ dành cho chủ bot.\n\n"
+                    "Bot này chỉ dùng riêng cho 1 người."
+                )
+                if getattr(update, "effective_message", None):
+                    await update.effective_message.reply_text(msg)
+                else:
+                    print("⛔ Lệnh admin bị từ chối (no message object)")
+                return
+            return await func(update, context)
+
         # Nếu không set ADMIN_IDS → cho phép tất cả (backward compatibility)
         if not ADMIN_IDS:
             return await func(update, context)
-        
+
         # Nếu không phải admin → từ chối
         if user_id not in ADMIN_IDS:
             msg = (
@@ -220,7 +242,7 @@ def admin_only(func):
             else:
                 print("⛔ Lệnh admin bị từ chối (no message object)")
             return
-        
+
         return await func(update, context)
     
     return wrapper
@@ -230,6 +252,18 @@ def admin_only(func):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    # Chỉ chấp nhận private chat và (nếu OWNER_ID set) chỉ chủ bot
+    chat = update.effective_chat
+    if getattr(chat, 'type', None) != 'private':
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("⚠️ Bot chỉ hoạt động trong cuộc trò chuyện riêng tư (private chat).")
+        return
+
+    if OWNER_ID is not None and chat_id != OWNER_ID:
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("⛔ Bot này chỉ phục vụ chủ sở hữu. Bạn không có quyền sử dụng.")
+        return
+
     SUBSCRIBERS.add(chat_id)
     if chat_id not in ALERT_MODE:
         ALERT_MODE[chat_id] = 1  # Mặc định: tất cả
@@ -269,20 +303,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def subscribe(update, context):
+    # Subscribe chỉ dành cho chủ bot (được kiểm tra bởi decorator)
     SUBSCRIBERS.add(update.effective_chat.id)
     save_data()  # Lưu ngay sau khi subscribe
     if getattr(update, "effective_message", None):
-        await update.effective_message.reply_text("Đã bật báo!")
+        await update.effective_message.reply_text("✅ Bạn đã bật báo (private).")
     else:
         print("Subscribe executed (no message to reply)")
 
 
 @admin_only
 async def unsubscribe(update, context):
+    # Unsubscribe chỉ dành cho chủ bot (được kiểm tra bởi decorator)
     SUBSCRIBERS.discard(update.effective_chat.id)
     save_data()  # Lưu sau khi unsubscribe
     if getattr(update, "effective_message", None):
-        await update.effective_message.reply_text("Đã tắt báo!")
+        await update.effective_message.reply_text("✅ Bạn đã tắt báo (private).")
     else:
         print("Unsubscribe executed (no message to reply)")
 
@@ -577,16 +613,7 @@ async def process_ticker(ticker_data, context):
             # Gửi alert
             tasks = []
             
-            # Nếu có CHANNEL_ID → gửi vào channel
-            if CHANNEL_ID:
-                tasks.append(
-                    context.bot.send_message(
-                        CHANNEL_ID,
-                        msg,
-                        parse_mode="Markdown",
-                        disable_web_page_preview=True
-                    )
-                )
+            # Channel sending disabled for single-owner private mode (no group/channel notifications)
             
             # Gửi cho subscribers cá nhân (nếu có)
             for chat in SUBSCRIBERS:
@@ -723,6 +750,13 @@ async def calc_movers(session, interval, symbols):
 
 async def timelist(update, context):
     """Lệnh xem lịch coin sẽ list trong 1 tuần - API Calendar"""
+    # Chỉ cho phép private chat (không trả lời group/channel)
+    chat = update.effective_chat
+    if getattr(chat, 'type', None) != 'private':
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("⚠️ Lệnh chỉ hoạt động trong cuộc trò chuyện riêng tư (private chat).")
+        return
+
     if getattr(update, "effective_message", None):
         await update.effective_message.reply_text("⏳ Đang lấy lịch listing...")
     else:
@@ -811,6 +845,13 @@ async def timelist(update, context):
 
 async def coinlist(update, context):
     """Lệnh xem các coin đã list trong 1 tuần - API Calendar"""
+    # Chỉ cho phép private chat (không trả lời group/channel)
+    chat = update.effective_chat
+    if getattr(chat, 'type', None) != 'private':
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("⚠️ Lệnh chỉ hoạt động trong cuộc trò chuyện riêng tư (private chat).")
+        return
+
     if getattr(update, "effective_message", None):
         await update.effective_message.reply_text("⏳ Đang lấy danh sách coin mới...")
     else:
@@ -989,14 +1030,7 @@ async def job_new_listing(context):
         
         # Gửi thông báo
         text = "\n".join(alerts)
-        
-        # Gửi vào channel nếu có
-        if CHANNEL_ID:
-            try:
-                await context.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown")
-            except Exception as e:
-                print(f"❌ Lỗi gửi thông báo coin mới vào channel: {e}")
-        
+        # Channel sending disabled for single-owner private mode (no group/channel notifications)
         # Gửi cho subscribers cá nhân
         for chat in SUBSCRIBERS:
             try:
@@ -1179,6 +1213,12 @@ async def schedule_restart(delay, reason):
 async def main():
     """Hàm chính để chạy bot."""
     load_data()  # Tải dữ liệu khi khởi động bot
+
+    # Nếu OWNER_ID được cấu hình, đảm bảo chỉ owner là subscriber
+    if OWNER_ID is not None:
+        SUBSCRIBERS.clear()
+        SUBSCRIBERS.add(OWNER_ID)
+        save_data()
 
     # Chạy các task song song
     await asyncio.gather(
