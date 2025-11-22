@@ -64,6 +64,13 @@ SCHEDULED_RESTARTS = set()  # Set of timestamps đã schedule restart
 # File để lưu dữ liệu persist
 DATA_FILE = "bot_data.pkl"
 
+# -- Coinlist fetch backoff to avoid noisy 404 logs --
+# Khi API coinlist lỗi liên tục, ta sẽ tạm hoãn các lần gọi tiếp theo.
+COINLIST_NEXT_ATTEMPT = datetime.min
+COINLIST_INITIAL_BACKOFF = 3600       # 1 giờ
+COINLIST_BACKOFF = COINLIST_INITIAL_BACKOFF
+COINLIST_MAX_BACKOFF = 86400         # 24 giờ
+
 
 # ================== PERSISTENT DATA ==================
 def save_data():
@@ -1167,17 +1174,30 @@ async def fetch_coin_list_schedule(session):
     """Lấy lịch coin list từ API và trả về danh sách thời gian list (giờ VN)."""
     url = f"{FUTURES_BASE}/api/v1/contract/coinlist"  # Giả sử đây là endpoint lấy lịch coin list
 
-    # Một số endpoint có thể không tồn tại (404) hoặc trả về format khác.
-    # Bắt mọi lỗi ở đây và trả về danh sách rỗng để không làm crash toàn bộ bot.
+    # Backoff guard: nếu hiện tại chưa tới thời điểm thử lại, trả về rỗng
+    global COINLIST_NEXT_ATTEMPT, COINLIST_BACKOFF
+    now = datetime.now()
+    if now < COINLIST_NEXT_ATTEMPT:
+        return []
+
+    # Thử gọi API, nếu lỗi thì bật backoff (tăng dần) và trả về rỗng
     try:
         data = await fetch_json(session, url)
     except Exception as e:
         print(f"❌ fetch_coin_list_schedule: failed to fetch {url}: {e}")
+        # Tính thời điểm thử lại tiếp theo và tăng backoff
+        COINLIST_NEXT_ATTEMPT = now + timedelta(seconds=COINLIST_BACKOFF)
+        COINLIST_BACKOFF = min(COINLIST_BACKOFF * 2, COINLIST_MAX_BACKOFF)
+        print(f"   Next attempt at {COINLIST_NEXT_ATTEMPT} (backoff={COINLIST_BACKOFF}s)")
         return []
 
     # Nếu data không phải dict hoặc không có key 'coins', trả về rỗng
     if not isinstance(data, dict):
         return []
+
+    # Thành công -> reset backoff
+    COINLIST_BACKOFF = COINLIST_INITIAL_BACKOFF
+    COINLIST_NEXT_ATTEMPT = datetime.min
 
     schedules = []
     for coin in data.get("coins", []):
