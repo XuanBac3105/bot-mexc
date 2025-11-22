@@ -766,7 +766,7 @@ async def post_init(application: Application):
     # chạy WebSocket trong background bằng job_queue (tránh warning PTB)
     application.job_queue.run_once(
         websocket_job,
-        when=0,
+        when=2,
         name="websocket_stream",
     )
 
