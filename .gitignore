@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+ENV/
+.DS_Store
+
+# Bot data file
+bot_data.pkl
+
+# Test files - tự động bỏ qua
+test_*.py
+*_test.py
+
+# HTML files - downloaded pages
+*.html
+
+# Logs
+*.log
