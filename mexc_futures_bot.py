@@ -3,14 +3,13 @@ import sys
 import asyncio
 import json
 import pickle
-from telegram import BotCommand
 from datetime import datetime, timedelta
 
 import aiohttp
 import websockets
 import pytz
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     Application,
@@ -53,7 +52,7 @@ ALL_SYMBOLS: list[str] = []            # cache tất cả symbol
 LAST_PRICES: dict[str, dict] = {}      # {symbol: {"price": float, "time": datetime}}
 BASE_PRICES: dict[str, float] = {}     # {symbol: base_price}
 ALERTED_SYMBOLS: dict[str, datetime] = {}  # {symbol: last_alert_time}
-MAX_CHANGES: dict[str, dict] = {}      # {symbol: {"max_pct": float, "time": datetime, "last_alerted_pct": float}}
+MAX_CHANGES: dict[str, dict] = {}      # {symbol: {"max_pct": float, "time": datetime}}
 LAST_SIGNIFICANT_CHANGE: dict[str, datetime] = {}
 
 DATA_FILE = "bot_data.pkl"
@@ -459,7 +458,7 @@ async def cmd_coinlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== WEBSOCKET & PUMP/DUMP LOGIC ==================
 async def process_ticker(bot, ticker_data: dict):
-    """Xử lý 1 gói ticker và gửi alert nếu vượt ngưỡng."""
+    """Xử lý 1 gói ticker và gửi alert nếu vượt ngưỡng (không hạn chế lặp)."""
     symbol = ticker_data.get("symbol")
     if not symbol:
         return
@@ -485,16 +484,16 @@ async def process_ticker(bot, ticker_data: dict):
         price_change = (current_price - base_price) / base_price * 100
         abs_change = abs(price_change)
 
-        # track max change
+        # track max change (chỉ để log)
         if symbol not in MAX_CHANGES:
-            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now, "last_alerted_pct": 0.0}
+            MAX_CHANGES[symbol] = {"max_pct": price_change, "time": now}
+        else:
+            if abs(price_change) > abs(MAX_CHANGES[symbol]["max_pct"]):
+                MAX_CHANGES[symbol]["max_pct"] = price_change
+                MAX_CHANGES[symbol]["time"] = now
+                LAST_SIGNIFICANT_CHANGE[symbol] = now
 
-        if abs_change > abs(MAX_CHANGES[symbol]["max_pct"]):
-            MAX_CHANGES[symbol]["max_pct"] = price_change
-            MAX_CHANGES[symbol]["time"] = now
-            LAST_SIGNIFICANT_CHANGE[symbol] = now
-
-        # điều kiện reset base
+        # điều kiện reset base (để không bị drift quá xa)
         should_reset_base = False
         if abs_change < 1.5:
             should_reset_base = True
@@ -504,28 +503,14 @@ async def process_ticker(bot, ticker_data: dict):
 
         if should_reset_base:
             BASE_PRICES[symbol] = current_price
-            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now, "last_alerted_pct": 0.0}
+            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
 
         # kiểm tra có nên alert không
         if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
             return
 
-        last_alert_time = ALERTED_SYMBOLS.get(symbol)
-        last_alerted_pct = MAX_CHANGES[symbol].get("last_alerted_pct", 0.0)
-
-        should_alert = False
-        if last_alert_time is None:
-            should_alert = True
-        else:
-            # chỉ alert lại nếu vượt thêm ≥1.5% so với lần alert trước
-            if abs_change >= abs(last_alerted_pct) + 1.5:
-                should_alert = True
-
-        if not should_alert:
-            return
-
+        # lưu lại thời điểm alert để job reset base dùng
         ALERTED_SYMBOLS[symbol] = now
-        MAX_CHANGES[symbol]["last_alerted_pct"] = price_change
 
         msg = fmt_alert(symbol, base_price, current_price, price_change)
         if price_change >= PUMP_THRESHOLD:
@@ -546,18 +531,17 @@ async def process_ticker(bot, ticker_data: dict):
                 )
             )
 
-        # gửi cho subscribers riêng
+        # gửi cho subscribers riêng (KHÔNG chặn lặp – mỗi lần tick mà đủ % là gửi)
         for chat_id in list(SUBSCRIBERS):
             if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
                 continue
 
             mode = ALERT_MODE.get(chat_id, 1)
-            # Mode 1: báo tất cả
-            if mode == 2 and abs_change > MODERATE_MAX:
-                # chỉ 3–5%
+            # Mode 2: chỉ 3–5%
+            if mode == 2 and not (PUMP_THRESHOLD <= abs_change <= MODERATE_MAX):
                 continue
+            # Mode 3: chỉ ≥10%
             if mode == 3 and abs_change < EXTREME_THRESHOLD:
-                # chỉ ≥10%
                 continue
 
             tasks.append(
@@ -575,7 +559,7 @@ async def process_ticker(bot, ticker_data: dict):
             # nếu biến động cực mạnh thì reset base ngay
             if abs_change >= EXTREME_THRESHOLD:
                 BASE_PRICES[symbol] = current_price
-                MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now, "last_alerted_pct": 0.0}
+                MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
                 print(f"🔁 Reset base price cho {symbol} sau alert cực mạnh {abs_change:.2f}%")
 
     except Exception as e:
@@ -802,9 +786,7 @@ async def post_init(application: Application):
         name="new_listing",
     )
 
-    # ================================
-    # 🔥 THÊM MENU LỆNH Ở ĐÂY
-    # ================================
+    # Đăng ký menu lệnh cho bot
     await application.bot.set_my_commands([
         BotCommand("start", "Bắt đầu & xem hướng dẫn"),
         BotCommand("subscribe", "Bật thông báo"),
@@ -818,9 +800,33 @@ async def post_init(application: Application):
         BotCommand("timelist", "Coin sắp list 7 ngày tới"),
         BotCommand("coinlist", "Coin đã list 7 ngày qua"),
     ])
-    # ================================
 
     print("✅ post_init hoàn tất – bot sẵn sàng quét MEXC Futures realtime")
+
+
+def main():
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    # command handlers
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    application.add_handler(CommandHandler("mode1", cmd_mode1))
+    application.add_handler(CommandHandler("mode2", cmd_mode2))
+    application.add_handler(CommandHandler("mode3", cmd_mode3))
+    application.add_handler(CommandHandler("mute", cmd_mute))
+    application.add_handler(CommandHandler("unmute", cmd_unmute))
+    application.add_handler(CommandHandler("mutelist", cmd_mutelist))
+    application.add_handler(CommandHandler("timelist", cmd_timelist))
+    application.add_handler(CommandHandler("coinlist", cmd_coinlist))
+
+    print("🔥 Bot MEXC Futures Alert đang chạy…")
+    application.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
