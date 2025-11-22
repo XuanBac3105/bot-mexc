@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import json
 import pickle
@@ -55,6 +56,9 @@ MAX_CHANGES: dict[str, dict] = {}      # {symbol: {"max_pct": float, "time": dat
 LAST_SIGNIFICANT_CHANGE: dict[str, datetime] = {}
 
 DATA_FILE = "bot_data.pkl"
+
+# Queue để thông báo WebSocket subscribe thêm coin mới (dynamic)
+WS_SUB_QUEUE: asyncio.Queue | None = None
 
 
 # ================== PERSISTENT DATA ==================
@@ -579,17 +583,22 @@ async def process_ticker(bot, ticker_data: dict):
 
 async def websocket_stream(application: Application):
     """Lắng nghe WebSocket ticker của MEXC và gọi process_ticker()."""
-    global ALL_SYMBOLS
+    global ALL_SYMBOLS, KNOWN_SYMBOLS, WS_SUB_QUEUE
 
     reconnect_delay = 5
 
     while True:
         try:
+            # Khởi tạo queue nếu chưa có
+            if WS_SUB_QUEUE is None:
+                WS_SUB_QUEUE = asyncio.Queue()
+
+            # Nếu chưa có danh sách symbol thì fetch
             if not ALL_SYMBOLS:
-                # nếu chưa cache symbols thì tự fetch
                 async with aiohttp.ClientSession() as session:
                     ALL_SYMBOLS = await get_all_symbols(session)
-                    KNOWN_SYMBOLS.update(ALL_SYMBOLS)
+                    if not KNOWN_SYMBOLS:
+                        KNOWN_SYMBOLS = set(ALL_SYMBOLS)
 
             async with websockets.connect(
                 WEBSOCKET_URL,
@@ -600,7 +609,7 @@ async def websocket_stream(application: Application):
                 print("✅ Kết nối WebSocket thành công")
                 reconnect_delay = 5
 
-                # subscribe tất cả symbol
+                # Subscribe tất cả symbol hiện có
                 for sym in ALL_SYMBOLS:
                     sub_msg = {
                         "method": "sub.ticker",
@@ -611,20 +620,48 @@ async def websocket_stream(application: Application):
 
                 print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin futures")
 
+                # Vòng lặp nhận dữ liệu
                 async for message in ws:
                     try:
                         data = json.loads(message)
                     except json.JSONDecodeError:
                         continue
 
-                    # ping/pong (phòng trường hợp server dùng json ping)
+                    # Ping/pong
                     if "ping" in data:
                         await ws.send(json.dumps({"pong": data["ping"]}))
                         continue
 
-                    # format MEXC futures: channel = "push.ticker"
+                    # Ticker data
                     if data.get("channel") == "push.ticker" and "data" in data:
                         await process_ticker(application.bot, data["data"])
+
+                    # SAU KHI XỬ LÝ TICKER → CHECK XEM CÓ COIN MỚI CẦN SUB KHÔNG
+                    if WS_SUB_QUEUE is not None:
+                        while not WS_SUB_QUEUE.empty():
+                            try:
+                                new_sym = await WS_SUB_QUEUE.get()
+                            except Exception:
+                                break
+
+                            # tránh subscribe trùng
+                            if new_sym not in ALL_SYMBOLS:
+                                ALL_SYMBOLS.append(new_sym)
+
+                            sub_msg = {
+                                "method": "sub.ticker",
+                                "param": {"symbol": new_sym},
+                            }
+                            try:
+                                await ws.send(json.dumps(sub_msg))
+                                print(f"📡 Đã subscribe thêm coin mới: {new_sym}")
+                            except Exception as e:
+                                print(f"⚠️ Lỗi khi subscribe thêm {new_sym}: {e}")
+                                # nếu lỗi, cho vào queue lại để thử ở vòng sau
+                                try:
+                                    WS_SUB_QUEUE.put_nowait(new_sym)
+                                except Exception:
+                                    pass
 
         except Exception as e:
             print(f"❌ WebSocket error: {e}")
@@ -704,6 +741,26 @@ async def job_new_listing(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ job_new_listing: send to {chat_id} error {e}")
 
+    # ======= DYNAMIC SUBSCRIBE CHO COIN MỚI (KHÔNG CẦN RESTART) =======
+    global WS_SUB_QUEUE, ALL_SYMBOLS
+
+    for sym in new_coins:
+        if sym not in ALL_SYMBOLS:
+            ALL_SYMBOLS.append(sym)
+
+        if WS_SUB_QUEUE is not None:
+            try:
+                WS_SUB_QUEUE.put_nowait(sym)
+                print(f"🧩 Queue subscribe coin mới: {sym}")
+            except Exception as e:
+                print(f"⚠️ Không thể queue {sym} để subscribe: {e}")
+
+
+async def websocket_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job wrapper để chạy websocket_stream sau khi Application đã chạy."""
+    app = context.application
+    await websocket_stream(app)
+
 
 # ================== APP SETUP ==================
 async def post_init(application: Application):
@@ -721,8 +778,12 @@ async def post_init(application: Application):
     except Exception as e:
         print(f"⚠️ Không preload được symbols: {e}")
 
-    # chạy websocket trong background
-    application.create_task(websocket_stream(application))
+    # chạy WebSocket trong background bằng job_queue (tránh warning PTB)
+    application.job_queue.run_once(
+        websocket_job,
+        when=0,
+        name="websocket_stream",
+    )
 
     # job reset base price mỗi 5 phút
     application.job_queue.run_repeating(
