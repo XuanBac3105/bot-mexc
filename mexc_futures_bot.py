@@ -469,16 +469,24 @@ async def process_ticker(bot, ticker_data: dict):
 
     try:
         current_price = float(ticker_data.get("lastPrice", 0))
-        volume = float(ticker_data.get("volume24", 0))
+        
+        # Lấy volume USDT 24h (không phải volume coin)
+        # MEXC API: amount24 = volume tính theo USDT
+        volume_usdt = float(ticker_data.get("amount24", 0))
+        
+        # Fallback: nếu không có amount24, tính từ volume24 * price
+        if volume_usdt == 0:
+            volume_coin = float(ticker_data.get("volume24", 0))
+            volume_usdt = volume_coin * current_price
 
         if current_price <= 0:
             return
         
-        # Lọc coin volume thấp (log lần đầu để debug)
-        if volume < MIN_VOL_THRESHOLD:
+        # Lọc coin có volume USDT thấp (log lần đầu để debug)
+        if volume_usdt < MIN_VOL_THRESHOLD:
             if symbol not in BASE_PRICES:  # chỉ log lần đầu
                 coin_name = symbol.replace("_USDT", "")
-                print(f"⏭️ Skip {coin_name}: vol={volume:,.0f} < {MIN_VOL_THRESHOLD:,.0f}")
+                print(f"⏭️ Skip {coin_name}: vol=${volume_usdt:,.0f} < ${MIN_VOL_THRESHOLD:,.0f}")
             return
 
         now = datetime.now()
@@ -556,9 +564,9 @@ async def process_ticker(bot, ticker_data: dict):
         msg = fmt_alert(symbol, base_price, current_price, price_change)
         coin_name = symbol.replace("_USDT", "")
         if price_change >= PUMP_THRESHOLD:
-            print(f"🚀 PUMP {coin_name}: {price_change:+.2f}% (vol={volume:,.0f})")
+            print(f"🚀 PUMP {coin_name}: {price_change:+.2f}% (vol=${volume_usdt:,.0f})")
         else:
-            print(f"💥 DUMP {coin_name}: {price_change:+.2f}% (vol={volume:,.0f})")
+            print(f"💥 DUMP {coin_name}: {price_change:+.2f}% (vol=${volume_usdt:,.0f})")
 
         # gửi vào channel nếu có
         tasks = []
