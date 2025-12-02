@@ -38,7 +38,7 @@ DUMP_THRESHOLD = -3.0     # Giảm <= -3%
 MODERATE_MAX = 5.0        # 3–5% = biến động trung bình
 EXTREME_THRESHOLD = 10.0  # >=10% = biến động cực mạnh
 
-# Volume tối thiểu để tránh coin ít thanh khoản
+# Volume tối thiểu để tránh coin ít thanh khoản (giảm để bắt coin mới)
 MIN_VOL_THRESHOLD = 100000
 
 # ================== GLOBAL STATE ==================
@@ -594,16 +594,49 @@ async def websocket_stream(application: Application):
                 print("✅ Kết nối WebSocket thành công")
                 reconnect_delay = 5
 
-                # Subscribe tất cả symbol hiện có
-                for sym in ALL_SYMBOLS:
+                # Subscribe tất cả symbol hiện có (batch để nhanh hơn)
+                print(f"📡 Đang subscribe {len(ALL_SYMBOLS)} coin futures...")
+                for i, sym in enumerate(ALL_SYMBOLS):
                     sub_msg = {
                         "method": "sub.ticker",
                         "param": {"symbol": sym},
                     }
                     await ws.send(json.dumps(sub_msg))
-                    await asyncio.sleep(0.005)
+                    # Giảm delay để subscribe nhanh hơn
+                    if i % 100 == 0:
+                        await asyncio.sleep(0.1)  # pause mỗi 100 coin
+                    else:
+                        await asyncio.sleep(0.001)
 
                 print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin futures")
+
+                # Task riêng để xử lý queue coin mới liên tục
+                async def process_new_coins_queue():
+                    while True:
+                        try:
+                            if WS_SUB_QUEUE is None or WS_SUB_QUEUE.empty():
+                                await asyncio.sleep(1)
+                                continue
+                            
+                            new_sym = await WS_SUB_QUEUE.get()
+                            
+                            # tránh subscribe trùng
+                            if new_sym not in ALL_SYMBOLS:
+                                ALL_SYMBOLS.append(new_sym)
+                            
+                            sub_msg = {
+                                "method": "sub.ticker",
+                                "param": {"symbol": new_sym},
+                            }
+                            await ws.send(json.dumps(sub_msg))
+                            print(f"📡 Đã subscribe thêm coin mới: {new_sym}")
+                            await asyncio.sleep(0.1)
+                        except Exception as e:
+                            print(f"⚠️ Lỗi process_new_coins_queue: {e}")
+                            await asyncio.sleep(1)
+                
+                # Chạy task xử lý queue song song
+                queue_task = asyncio.create_task(process_new_coins_queue())
 
                 # Vòng lặp nhận dữ liệu
                 async for message in ws:
@@ -620,33 +653,6 @@ async def websocket_stream(application: Application):
                     # Ticker data
                     if data.get("channel") == "push.ticker" and "data" in data:
                         await process_ticker(application.bot, data["data"])
-
-                    # SAU KHI XỬ LÝ TICKER → CHECK XEM CÓ COIN MỚI CẦN SUB KHÔNG
-                    if WS_SUB_QUEUE is not None:
-                        while not WS_SUB_QUEUE.empty():
-                            try:
-                                new_sym = await WS_SUB_QUEUE.get()
-                            except Exception:
-                                break
-
-                            # tránh subscribe trùng
-                            if new_sym not in ALL_SYMBOLS:
-                                ALL_SYMBOLS.append(new_sym)
-
-                            sub_msg = {
-                                "method": "sub.ticker",
-                                "param": {"symbol": new_sym},
-                            }
-                            try:
-                                await ws.send(json.dumps(sub_msg))
-                                print(f"📡 Đã subscribe thêm coin mới: {new_sym}")
-                            except Exception as e:
-                                print(f"⚠️ Lỗi khi subscribe thêm {new_sym}: {e}")
-                                # nếu lỗi, cho vào queue lại để thử ở vòng sau
-                                try:
-                                    WS_SUB_QUEUE.put_nowait(new_sym)
-                                except Exception:
-                                    pass
 
         except Exception as e:
             print(f"❌ WebSocket error: {e}")
@@ -778,11 +784,11 @@ async def post_init(application: Application):
         name="reset_base_prices",
     )
 
-    # job check coin mới list mỗi 10 phút
+    # job check coin mới list mỗi 3 phút (tăng tần suất để không bỏ sót)
     application.job_queue.run_repeating(
         job_new_listing,
-        interval=600,
-        first=120,
+        interval=180,
+        first=60,
         name="new_listing",
     )
 
