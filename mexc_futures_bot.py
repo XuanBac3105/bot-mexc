@@ -51,7 +51,9 @@ ALL_SYMBOLS: list[str] = []            # cache tất cả symbol
 
 LAST_PRICES: dict[str, dict] = {}      # {symbol: {"price": float, "time": datetime}}
 BASE_PRICES: dict[str, float] = {}     # {symbol: base_price}
-ALERTED_SYMBOLS: dict[str, dict] = {}  # {symbol: {"time": datetime, "pct": float}}
+ALERTED_SYMBOLS: dict[str, datetime] = {}  # {symbol: last_alert_time}
+MAX_CHANGES: dict[str, dict] = {}      # {symbol: {"max_pct": float, "time": datetime}}
+LAST_SIGNIFICANT_CHANGE: dict[str, datetime] = {}
 
 DATA_FILE = "bot_data.pkl"
 
@@ -456,7 +458,7 @@ async def cmd_coinlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== WEBSOCKET & PUMP/DUMP LOGIC ==================
 async def process_ticker(bot, ticker_data: dict):
-    """Xử lý 1 gói ticker và gửi alert - BẮT HẾT pump/dump liên tiếp."""
+    """Xử lý 1 gói ticker và gửi alert nếu vượt ngưỡng (không hạn chế lặp)."""
     symbol = ticker_data.get("symbol")
     if not symbol:
         return
@@ -473,14 +475,7 @@ async def process_ticker(bot, ticker_data: dict):
             volume_coin = float(ticker_data.get("volume24", 0))
             volume_usdt = volume_coin * current_price
 
-        if current_price <= 0:
-            return
-        
-        # Lọc coin có volume USDT thấp (log lần đầu để debug)
-        if volume_usdt < MIN_VOL_THRESHOLD:
-            if symbol not in BASE_PRICES:  # chỉ log lần đầu
-                coin_name = symbol.replace("_USDT", "")
-                print(f"⏭️ Skip {coin_name}: vol=${volume_usdt:,.0f} < ${MIN_VOL_THRESHOLD:,.0f}")
+        if current_price <= 0 or volume_usdt < MIN_VOL_THRESHOLD:
             return
 
         now = datetime.now()
@@ -494,63 +489,42 @@ async def process_ticker(bot, ticker_data: dict):
             return
 
         base_price = BASE_PRICES[symbol]
-        
-        # Tính % thay đổi từ base
         price_change = (current_price - base_price) / base_price * 100
         abs_change = abs(price_change)
 
-        # RESET BASE nhanh khi giá đảo chiều hoặc ổn định
-        alert_info = ALERTED_SYMBOLS.get(symbol)
-        if alert_info:
-            last_alert_pct = alert_info.get("pct", 0)
-            last_alert_time = alert_info.get("time")
-            time_since_alert = (now - last_alert_time).total_seconds()
-            
-            # Đảo chiều: từ pump → dump hoặc ngược lại
-            if (last_alert_pct > 0 and price_change < 0) or (last_alert_pct < 0 and price_change > 0):
-                BASE_PRICES[symbol] = current_price
-                del ALERTED_SYMBOLS[symbol]
-                return
-            
-            # Giá ổn định < 0.5% trong 30s → reset
-            if time_since_alert > 30 and abs_change < 0.5:
-                BASE_PRICES[symbol] = current_price
-                del ALERTED_SYMBOLS[symbol]
-                return
+        # track max change (chỉ để log)
+        if symbol not in MAX_CHANGES:
+            MAX_CHANGES[symbol] = {"max_pct": price_change, "time": now}
+        else:
+            if abs(price_change) > abs(MAX_CHANGES[symbol]["max_pct"]):
+                MAX_CHANGES[symbol]["max_pct"] = price_change
+                MAX_CHANGES[symbol]["time"] = now
+                LAST_SIGNIFICANT_CHANGE[symbol] = now
 
-        # Kiểm tra có nên alert không
+        # điều kiện reset base (để không bị drift quá xa)
+        should_reset_base = False
+        if abs_change < 1.5:
+            should_reset_base = True
+        elif symbol in LAST_SIGNIFICANT_CHANGE:
+            if (now - LAST_SIGNIFICANT_CHANGE[symbol]).total_seconds() > 50:
+                should_reset_base = True
+
+        if should_reset_base:
+            BASE_PRICES[symbol] = current_price
+            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
+
+        # kiểm tra có nên alert không
         if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
             return
 
-        # BẮT HẾT pump/dump liên tiếp:
-        # - Alert lần đầu khi vượt ngưỡng
-        # - Alert lại nếu % thay đổi thêm >= 1% so với lần trước
-        should_alert = False
-        
-        if symbol not in ALERTED_SYMBOLS:
-            # Lần đầu tiên vượt ngưỡng
-            should_alert = True
-        else:
-            # Đã từng alert, kiểm tra xem % có tăng/giảm đáng kể không
-            last_alert_pct = ALERTED_SYMBOLS[symbol].get("pct", 0)
-            pct_diff = abs(price_change - last_alert_pct)
-            
-            # Alert nếu thay đổi thêm >= 1%
-            if pct_diff >= 1.0:
-                should_alert = True
-
-        if not should_alert:
-            return
-
-        # Lưu lại thời điểm và % alert
-        ALERTED_SYMBOLS[symbol] = {"time": now, "pct": price_change}
+        # lưu lại thời điểm alert để job reset base dùng
+        ALERTED_SYMBOLS[symbol] = now
 
         msg = fmt_alert(symbol, base_price, current_price, price_change)
-        coin_name = symbol.replace("_USDT", "")
         if price_change >= PUMP_THRESHOLD:
-            print(f"🚀 PUMP {coin_name}: {price_change:+.2f}% (vol=${volume_usdt:,.0f})")
+            print(f"🚀 PUMP {symbol}: {price_change:+.2f}% (max {MAX_CHANGES[symbol]['max_pct']:+.2f}%)")
         else:
-            print(f"💥 DUMP {coin_name}: {price_change:+.2f}% (vol=${volume_usdt:,.0f})")
+            print(f"💥 DUMP {symbol}: {price_change:+.2f}% (max {MAX_CHANGES[symbol]['max_pct']:+.2f}%)")
 
         # gửi vào channel nếu có
         tasks = []
@@ -565,7 +539,7 @@ async def process_ticker(bot, ticker_data: dict):
                 )
             )
 
-        # gửi cho subscribers riêng
+        # gửi cho subscribers riêng (KHÔNG chặn lặp – mỗi lần tick mà đủ % là gửi)
         for chat_id in list(SUBSCRIBERS):
             if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
                 continue
@@ -589,6 +563,11 @@ async def process_ticker(bot, ticker_data: dict):
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+            # RESET BASE NGAY SAU KHI GỬI ALERT để tránh spam
+            BASE_PRICES[symbol] = current_price
+            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
+            print(f"🔁 Reset base price cho {symbol} sau alert {abs_change:.2f}%")
 
     except Exception as e:
         print(f"❌ Error processing ticker for {symbol}: {e}")
@@ -691,23 +670,15 @@ async def websocket_stream(application: Application):
 
 # ================== JOBS ==================
 async def job_reset_base_prices(context: ContextTypes.DEFAULT_TYPE):
-    """Job backup: mỗi 5 phút reset base price cho coin không có biến động."""
+    """Job backup: mỗi 5 phút reset base price cho coin không alert gần đây."""
     now = datetime.now()
     reset_count = 0
     for symbol, info in list(LAST_PRICES.items()):
         last_price = info["price"]
-        alert_info = ALERTED_SYMBOLS.get(symbol)
-        
-        # Reset nếu không có alert gần đây (quá 5 phút)
-        if not alert_info:
+        last_alert = ALERTED_SYMBOLS.get(symbol)
+        if not last_alert or (now - last_alert).total_seconds() > 300:
             BASE_PRICES[symbol] = last_price
             reset_count += 1
-        else:
-            last_alert_time = alert_info.get("time")
-            if (now - last_alert_time).total_seconds() > 300:
-                BASE_PRICES[symbol] = last_price
-                reset_count += 1
-                
     if reset_count:
         print(f"🔄 Backup reset base price cho {reset_count} symbol")
 
