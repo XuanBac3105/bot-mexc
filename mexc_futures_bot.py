@@ -39,7 +39,7 @@ MODERATE_MAX = 5.0        # 3–5% = biến động trung bình
 EXTREME_THRESHOLD = 10.0  # >=10% = biến động cực mạnh
 
 # Volume tối thiểu để tránh coin ít thanh khoản (giảm để bắt coin mới)
-MIN_VOL_THRESHOLD = 100000
+MIN_VOL_THRESHOLD = 100000  # 100k USDT
 
 # ================== GLOBAL STATE ==================
 SUBSCRIBERS: set[int] = set()          # chat_id nhận alert private
@@ -556,11 +556,10 @@ async def process_ticker(bot, ticker_data: dict):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            # nếu biến động cực mạnh thì reset base ngay
-            if abs_change >= EXTREME_THRESHOLD:
-                BASE_PRICES[symbol] = current_price
-                MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
-                print(f"🔁 Reset base price cho {symbol} sau alert cực mạnh {abs_change:.2f}%")
+            # RESET BASE NGAY SAU KHI GỬI ALERT để tránh spam
+            BASE_PRICES[symbol] = current_price
+            MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
+            print(f"🔁 Reset base price cho {symbol} sau alert {abs_change:.2f}%")
 
     except Exception as e:
         print(f"❌ Error processing ticker for {symbol}: {e}")
