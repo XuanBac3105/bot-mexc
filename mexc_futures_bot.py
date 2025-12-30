@@ -825,9 +825,21 @@ async def post_init(application: Application):
 
 
 def main():
+    from telegram.request import HTTPXRequest
+    
+    # Tăng timeout để xử lý mạng chậm trên Railway
+    request = HTTPXRequest(
+        connect_timeout=60.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=60.0,
+    )
+    
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(request)
         .post_init(post_init)
         .build()
     )
