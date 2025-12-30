@@ -1,0 +1,13 @@
+services:
+  mexc-bot:
+    build: .
+    container_name: mexc-futures-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./mexc_futures_bot.py:/app/mexc_futures_bot.py:ro
+      - ./bot_data.pkl:/app/bot_data.pkl
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4

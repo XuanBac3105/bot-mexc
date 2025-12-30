@@ -26,3 +26,10 @@ test_*.py
 
 # Logs
 *.log
+
+# VEO3 Video Generator
+generated_videos/
+character_references/
+*.mp4
+*.mov
+*.avi

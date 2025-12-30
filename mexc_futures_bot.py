@@ -794,8 +794,8 @@ async def post_init(application: Application):
         name="new_listing",
     )
 
-    # Đăng ký menu lệnh cho bot
-    await application.bot.set_my_commands([
+    # Đăng ký menu lệnh cho bot (với retry để xử lý lỗi mạng tạm thời)
+    commands = [
         BotCommand("start", "Bắt đầu & xem hướng dẫn"),
         BotCommand("subscribe", "Bật thông báo"),
         BotCommand("unsubscribe", "Tắt thông báo"),
@@ -807,7 +807,19 @@ async def post_init(application: Application):
         BotCommand("mutelist", "Danh sách coin bị mute"),
         BotCommand("timelist", "Coin sắp list 7 ngày tới"),
         BotCommand("coinlist", "Coin đã list 7 ngày qua"),
-    ])
+    ]
+    
+    for attempt in range(3):
+        try:
+            await application.bot.set_my_commands(commands)
+            print("✅ Đã đăng ký menu lệnh thành công")
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"⚠️ Lỗi set_my_commands, thử lại ({attempt + 1}/3): {e}")
+                await asyncio.sleep(3)
+            else:
+                print(f"⚠️ Không thể set_my_commands sau 3 lần thử, bỏ qua: {e}")
 
     print("✅ post_init hoàn tất – bot sẵn sàng quét MEXC Futures realtime")
 
