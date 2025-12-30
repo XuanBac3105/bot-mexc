@@ -861,5 +861,53 @@ def main():
     application.run_polling(close_loop=False)
 
 
-if __name__ == "__main__":
+# ================== HEALTH CHECK SERVER (giữ Render sống) ==================
+async def health_check_handler(request):
+    """Simple health check endpoint."""
+    from aiohttp import web
+    return web.Response(text="OK", status=200)
+
+
+async def run_health_server():
+    """Chạy HTTP server cho health check."""
+    from aiohttp import web
+    
+    app = web.Application()
+    app.router.add_get("/", health_check_handler)
+    app.router.add_get("/health", health_check_handler)
+    
+    port = int(os.getenv("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ Health check server đang chạy trên port {port}")
+    
+    # Giữ server chạy mãi
+    while True:
+        await asyncio.sleep(3600)
+
+
+def main_with_health():
+    """Chạy cả bot và health check server."""
+    import threading
+    
+    # Chạy health check server trong thread riêng
+    def run_health():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(run_health_server())
+    
+    health_thread = threading.Thread(target=run_health, daemon=True)
+    health_thread.start()
+    
+    # Chạy bot chính
     main()
+
+
+if __name__ == "__main__":
+    # Nếu có biến PORT (trên Render), chạy với health server
+    if os.getenv("PORT"):
+        main_with_health()
+    else:
+        main()
