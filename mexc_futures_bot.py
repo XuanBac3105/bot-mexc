@@ -55,6 +55,11 @@ ALERTED_SYMBOLS: dict[str, datetime] = {}  # {symbol: last_alert_time}
 MAX_CHANGES: dict[str, dict] = {}      # {symbol: {"max_pct": float, "time": datetime}}
 LAST_SIGNIFICANT_CHANGE: dict[str, datetime] = {}
 
+# ================== CANDLE CLOSE TRACKING ==================
+PUMP_DUMP_START_TIME: dict[str, datetime] = {}  # {symbol: datetime khi pump/dump bắt đầu}
+CANDLE_ALERTS_SENT: dict[str, set[str]] = {}    # {symbol: {"60s", "15s", "0s"}} - track mốc đã gửi
+CANDLE_INTERVAL_SECONDS = 60  # theo dõi candle 1 phút (60 giây)
+
 DATA_FILE = "bot_data.pkl"
 
 # Queue để thông báo WebSocket subscribe thêm coin mới (dynamic)
@@ -168,6 +173,60 @@ def fmt_alert(symbol: str, old_price: float, new_price: float, change_pct: float
         f"┌{icon} [{coin}]({link}) ⚡ {size_tag} {color}\n"
         f"└ {old_price:.6g} → {new_price:.6g}"
     )
+
+
+def fmt_countdown_alert(symbol: str, milestone: str, change_pct: float, max_change_pct: float, seconds_left: int) -> str:
+    """Format countdown alert cho 3 mốc: 60s, 15s, 0s"""
+    abs_change = abs(change_pct)
+    color = "🟢" if change_pct >= 0 else "🔴"
+    coin = symbol.replace("_USDT", "")
+    link = f"https://www.mexc.co/futures/{symbol}"
+    
+    # Xác định icon và message dựa trên mốc
+    if milestone == "60s":
+        if abs_change >= EXTREME_THRESHOLD:
+            icon = "🔥🔥🔥" if change_pct >= 0 else "💥💥💥"
+            action = "Pump" if change_pct >= 0 else "Dump"
+        else:
+            icon = "🔥" if change_pct >= 0 else "💥"
+            action = "Pump" if change_pct >= 0 else "Dump"
+        
+        return (
+            f"┌{icon} *Bot {action} sắp sàng!*\n"
+            f"├ [{coin}]({link}) {color}\n"
+            f"├ Đã tải {len(ALL_SYMBOLS)} coins\n"
+            f"├ Biến động hiện tại: {change_pct:+.2f}%\n"
+            f"└ ⏰ Theo dõi 60s nến đóng ({action.lower()} > {abs(PUMP_THRESHOLD if change_pct >= 0 else DUMP_THRESHOLD):.0f}%)"
+        )
+    
+    elif milestone == "15s":
+        if abs_change >= EXTREME_THRESHOLD:
+            icon = "⚡⚡⚡" if change_pct >= 0 else "⚠️⚠️⚠️"
+        else:
+            icon = "⚡" if change_pct >= 0 else "⚠️"
+        
+        action = "pump" if change_pct >= 0 else "dump"
+        return (
+            f"┌{icon} *Alert trước 15s khi {action} > {abs(PUMP_THRESHOLD if change_pct >= 0 else DUMP_THRESHOLD):.0f}%*\n"
+            f"├ [{coin}]({link}) {color}\n"
+            f"├ Biến động: {change_pct:+.2f}% (max: {max_change_pct:+.2f}%)\n"
+            f"└ ⏰ Còn ~{seconds_left}s nến đóng"
+        )
+    
+    else:  # "0s" - nến đã đóng
+        if abs_change >= EXTREME_THRESHOLD:
+            icon = "✅✅✅" if change_pct >= 0 else "🛑🛑🛑"
+        else:
+            icon = "✅" if change_pct >= 0 else "🛑"
+        
+        action = "Pump" if change_pct >= 0 else "Dump"
+        return (
+            f"┌{icon} *Bot {action} khởi động*\n"
+            f"├ [{coin}]({link}) {color}\n"
+            f"├ Theo dõi {len(ALL_SYMBOLS)} coins\n"
+            f"├ Kết quả: {change_pct:+.2f}% (max: {max_change_pct:+.2f}%)\n"
+            f"└ ⏰ Alert trước 15s khi {action.lower()} > {abs(PUMP_THRESHOLD if change_pct >= 0 else DUMP_THRESHOLD):.0f}%"
+        )
 
 
 # ================== ADMIN CHECK DECORATOR ==================
@@ -506,7 +565,8 @@ async def process_ticker(bot, ticker_data: dict):
         if abs_change < 1.5:
             should_reset_base = True
         elif symbol in LAST_SIGNIFICANT_CHANGE:
-            if (now - LAST_SIGNIFICANT_CHANGE[symbol]).total_seconds() > 50:
+            # Giảm từ 50s → 30s để phản ứng nhanh hơn với biến động lớn
+            if (now - LAST_SIGNIFICANT_CHANGE[symbol]).total_seconds() > 30:
                 should_reset_base = True
 
         if should_reset_base:
@@ -519,6 +579,12 @@ async def process_ticker(bot, ticker_data: dict):
 
         # lưu lại thời điểm alert để job reset base dùng
         ALERTED_SYMBOLS[symbol] = now
+        
+        # =============== TRACK PUMP/DUMP START TIME ===============
+        # Nếu là lần đầu tiên vượt ngưỡng, lưu thời điểm bắt đầu
+        if symbol not in PUMP_DUMP_START_TIME:
+            PUMP_DUMP_START_TIME[symbol] = now
+            print(f"⏱️ Tracking candle close cho {symbol} từ {now.strftime('%H:%M:%S')}")
 
         msg = fmt_alert(symbol, base_price, current_price, price_change)
         if price_change >= PUMP_THRESHOLD:
@@ -560,6 +626,90 @@ async def process_ticker(bot, ticker_data: dict):
                     disable_web_page_preview=True,
                 )
             )
+
+        # =============== CHECK 3-TIER COUNTDOWN ALERTS ===============
+        # Báo 3 mốc: 60s (bắt đầu), 15s (chuẩn bị), 0s (kết quả)
+        if symbol in PUMP_DUMP_START_TIME:
+            elapsed = (now - PUMP_DUMP_START_TIME[symbol]).total_seconds()
+            seconds_to_close = CANDLE_INTERVAL_SECONDS - elapsed
+            
+            # Khởi tạo tracking cho symbol nếu chưa có
+            if symbol not in CANDLE_ALERTS_SENT:
+                CANDLE_ALERTS_SENT[symbol] = set()
+            
+            countdown_tasks = []
+            milestone = None
+            countdown_msg = None
+            
+            # Mốc 60s: Báo bắt đầu tracking (0-3s)
+            if 0 <= elapsed <= 3 and "60s" not in CANDLE_ALERTS_SENT[symbol]:
+                milestone = "60s"
+                countdown_msg = fmt_countdown_alert(
+                    symbol, milestone, price_change, 
+                    MAX_CHANGES[symbol]['max_pct'], int(seconds_to_close)
+                )
+                CANDLE_ALERTS_SENT[symbol].add("60s")
+                print(f"🔥 60s ALERT {symbol}: Bắt đầu tracking! {seconds_to_close:.1f}s còn lại")
+            
+            # Mốc 15s: Alert sắp đóng (43-47s elapsed = 13-17s còn lại)
+            elif 43 <= elapsed <= 47 and "15s" not in CANDLE_ALERTS_SENT[symbol]:
+                milestone = "15s"
+                countdown_msg = fmt_countdown_alert(
+                    symbol, milestone, price_change,
+                    MAX_CHANGES[symbol]['max_pct'], int(seconds_to_close)
+                )
+                CANDLE_ALERTS_SENT[symbol].add("15s")
+                print(f"⚡ 15s ALERT {symbol}: Nến sắp đóng! {seconds_to_close:.1f}s còn lại")
+            
+            # Mốc 0s: Kết quả cuối cùng (58-62s elapsed)
+            elif 58 <= elapsed <= 62 and "0s" not in CANDLE_ALERTS_SENT[symbol]:
+                milestone = "0s"
+                countdown_msg = fmt_countdown_alert(
+                    symbol, milestone, price_change,
+                    MAX_CHANGES[symbol]['max_pct'], 0
+                )
+                CANDLE_ALERTS_SENT[symbol].add("0s")
+                print(f"✅ 0s ALERT {symbol}: Nến đã đóng! Kết quả: {price_change:+.2f}%")
+            
+            # Gửi countdown alert nếu có
+            if countdown_msg:
+                if CHANNEL_ID:
+                    countdown_tasks.append(
+                        bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=countdown_msg,
+                            parse_mode=ParseMode.MARKDOWN,
+                            disable_web_page_preview=True,
+                        )
+                    )
+                
+                for chat_id in list(SUBSCRIBERS):
+                    if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
+                        continue
+                    
+                    mode = ALERT_MODE.get(chat_id, 1)
+                    if mode == 2 and not (PUMP_THRESHOLD <= abs_change <= MODERATE_MAX):
+                        continue
+                    if mode == 3 and abs_change < EXTREME_THRESHOLD:
+                        continue
+                    
+                    countdown_tasks.append(
+                        bot.send_message(
+                            chat_id=chat_id,
+                            text=countdown_msg,
+                            parse_mode=ParseMode.MARKDOWN,
+                            disable_web_page_preview=True,
+                        )
+                    )
+                
+                if countdown_tasks:
+                    await asyncio.gather(*countdown_tasks, return_exceptions=True)
+            
+            # Reset tracking nếu candle đã đóng (sau 65s để chắc chắn)
+            if elapsed >= 65:
+                PUMP_DUMP_START_TIME.pop(symbol, None)
+                CANDLE_ALERTS_SENT.pop(symbol, None)
+                print(f"🔄 Reset candle tracking cho {symbol}")
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
