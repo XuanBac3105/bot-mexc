@@ -858,7 +858,13 @@ def main():
     application.add_handler(CommandHandler("coinlist", cmd_coinlist))
 
     print("🔥 Bot MEXC Futures Alert đang chạy…")
-    application.run_polling(close_loop=False)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        print("⏸️ Bot dừng")
+    except Exception as e:
+        print(f"❌ Lỗi bot: {e}")
+        raise
 
 
 # ================== HEALTH CHECK SERVER (giữ Render sống) ==================
