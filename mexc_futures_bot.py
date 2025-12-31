@@ -30,7 +30,7 @@ if not BOT_TOKEN:
 
 # ================== CONFIG MEXC ==================
 FUTURES_BASE = "https://contract.mexc.co"
-WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # endpoint futures ticker
+WEBSOCKET_URL = "wss://contract.mexc.co/edge"  # endpoint futures ticker
 
 # Ngưỡng để báo động (%)
 PUMP_THRESHOLD = 3.0      # Tăng >= 3%
@@ -865,7 +865,6 @@ def main():
     except Exception as e:
         print(f"❌ Lỗi bot: {e}")
         raise
-
 
 if __name__ == "__main__":
     main()
