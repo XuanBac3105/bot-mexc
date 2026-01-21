@@ -260,27 +260,48 @@ def fmt_ohlc_alert(symbol: str, ohlc: dict) -> str:
     
     abs_change = abs(change_pct)
     color = "🟢" if change_pct >= 0 else "🔴"
-    
-    # Xác định loại alert dựa trên cả biến động và biên độ
     max_signal = max(abs_change, range_pct)
     
-    if change_pct >= OHLC_ALERT_THRESHOLD:
-        icon = "🚀🚀🚀"
-        action = "PUMP MẠNH"
-    elif change_pct <= -OHLC_ALERT_THRESHOLD:
-        icon = "💥💥💥"
-        action = "DUMP MẠNH"
-    elif range_pct >= OHLC_ALERT_THRESHOLD:
-        # Biên độ lớn nhưng thân nến nhỏ = có rút râu
-        if change_pct >= 0:
-            icon = "📈⚡"
-            action = "PUMP + RÚT RÂU"
+    # Phân biệt EXTREME (>=10%) vs NORMAL (<10%)
+    is_extreme = max_signal >= EXTREME_THRESHOLD
+    
+    # Xác định loại alert dựa trên biến động và biên độ
+    if is_extreme:
+        # EXTREME ALERTS - Format nổi bật hơn
+        if change_pct >= EXTREME_THRESHOLD:
+            icon = "🚀🚀🚀🔥"
+            action = "⚠️ PUMP CỰC MẠNH ⚠️"
+        elif change_pct <= -EXTREME_THRESHOLD:
+            icon = "💥💥💥🔥"
+            action = "⚠️ DUMP CỰC MẠNH ⚠️"
+        elif range_pct >= EXTREME_THRESHOLD:
+            if change_pct >= 0:
+                icon = "📈⚡🔥"
+                action = "⚠️ PUMP + RÚT RÂU MẠNH ⚠️"
+            else:
+                icon = "📉⚡🔥"
+                action = "⚠️ DUMP + RÚT RÂU MẠNH ⚠️"
         else:
-            icon = "📉⚡"
-            action = "DUMP + RÚT RÂU"
+            icon = "🔥🔥🔥"
+            action = "⚠️ BIẾN ĐỘNG CỰC MẠNH ⚠️"
     else:
-        icon = "⚠️"
-        action = "BIẾN ĐỘNG"
+        # NORMAL ALERTS (<10%)
+        if change_pct >= OHLC_ALERT_THRESHOLD:
+            icon = "🚀"
+            action = "PUMP"
+        elif change_pct <= -OHLC_ALERT_THRESHOLD:
+            icon = "💥"
+            action = "DUMP"
+        elif range_pct >= OHLC_ALERT_THRESHOLD:
+            if change_pct >= 0:
+                icon = "📈⚡"
+                action = "PUMP + RÚT RÂU"
+            else:
+                icon = "📉⚡"
+                action = "DUMP + RÚT RÂU"
+        else:
+            icon = "⚠️"
+            action = "BIẾN ĐỘNG"
     
     coin = symbol.replace("_USDT", "")
     link = f"https://www.mexc.co/futures/{symbol}"
@@ -290,14 +311,26 @@ def fmt_ohlc_alert(symbol: str, ohlc: dict) -> str:
     if range_pct > abs_change * 2 and range_pct >= 5:
         wick_warning = " ⚠️RÂU DÀI"
     
-    return (
-        f"┌{icon} *{action}*: [{coin}]({link})\n"
-        f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
-        f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
-        f"├ Biến động: {change_pct:+.2f}% {color} (thân nến)\n"
-        f"├ Biên độ: {range_pct:.2f}%{wick_warning} (cả râu)\n"
-        f"└ KL: {volume:,.0f} | Vol: {amount:,.2f} USDT"
-    )
+    # Format khác nhau cho EXTREME vs NORMAL
+    if is_extreme:
+        return (
+            f"{'='*20}\n"
+            f"┌{icon} *{action}*\n"
+            f"├ 🪙 [{coin}]({link})\n"
+            f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
+            f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
+            f"├ *Biến động: {change_pct:+.2f}%* {color}\n"
+            f"└ *Biên độ: {range_pct:.2f}%*{wick_warning}\n"
+            f"{'='*20}"
+        )
+    else:
+        return (
+            f"┌{icon} *{action}*: [{coin}]({link})\n"
+            f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
+            f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
+            f"├ Biến động: {change_pct:+.2f}% {color} (thân nến)\n"
+            f"└ Biên độ: {range_pct:.2f}%{wick_warning} (cả râu)"
+        )
 
 # ================== ADMIN CHECK DECORATOR ==================
 def admin_only(func):
@@ -663,10 +696,15 @@ async def process_kline(bot, kline_data: dict):
                 continue
             
             mode = ALERT_MODE.get(chat_id, 1)
-            # Mode 2: chỉ 3–5% - bỏ qua OHLC alert (vì OHLC chỉ báo >= 10%)
-            if mode == 2:
+            # Tính max signal để check mode
+            max_signal = max(abs_change, range_pct)
+            
+            # Mode 2: chỉ 3–5% - chỉ gửi nếu max_signal < 10%
+            if mode == 2 and max_signal >= EXTREME_THRESHOLD:
                 continue
-            # Mode 3: chỉ ≥10% - phù hợp với OHLC alert
+            # Mode 3: chỉ ≥10% - chỉ gửi nếu max_signal >= 10%
+            if mode == 3 and max_signal < EXTREME_THRESHOLD:
+                continue
             
             tasks.append(
                 bot.send_message(
