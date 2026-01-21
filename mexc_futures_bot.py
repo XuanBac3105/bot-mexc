@@ -38,6 +38,11 @@ DUMP_THRESHOLD = -3.0     # Giảm <= -3%
 MODERATE_MAX = 5.0        # 3–5% = biến động trung bình
 EXTREME_THRESHOLD = 10.0  # >=10% = biến động cực mạnh
 
+# ================== OHLC/KLINE CONFIG ==================
+KLINE_INTERVAL = "Min1"           # Timeframe nến 1 phút
+OHLC_ALERT_THRESHOLD = 10.0       # Ngưỡng biến động/biên độ để alert OHLC (%)
+OHLC_COOLDOWN_SECONDS = 60        # Cooldown giữa các alert OHLC cho cùng 1 symbol
+
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
 
@@ -59,6 +64,10 @@ LAST_SIGNIFICANT_CHANGE: dict[str, datetime] = {}
 PUMP_DUMP_START_TIME: dict[str, datetime] = {}  # {symbol: datetime khi pump/dump bắt đầu}
 CANDLE_ALERTS_SENT: dict[str, set[str]] = {}    # {symbol: {"60s", "15s", "0s"}} - track mốc đã gửi
 CANDLE_INTERVAL_SECONDS = 60  # theo dõi candle 1 phút (60 giây)
+
+# ================== OHLC DATA TRACKING ==================
+OHLC_DATA: dict[str, dict] = {}                 # {symbol: {open, high, low, close, vol, amount, time}}
+OHLC_LAST_ALERT: dict[str, datetime] = {}       # {symbol: last_alert_time} - cooldown cho OHLC
 
 DATA_FILE = "bot_data.pkl"
 
@@ -228,6 +237,67 @@ def fmt_countdown_alert(symbol: str, milestone: str, change_pct: float, max_chan
             f"└ ⏰ Alert trước 15s khi {action.lower()} > {abs(PUMP_THRESHOLD if change_pct >= 0 else DUMP_THRESHOLD):.0f}%"
         )
 
+
+def fmt_ohlc_alert(symbol: str, ohlc: dict) -> str:
+    """Format OHLC alert với đầy đủ thông tin nến."""
+    open_price = ohlc.get("open", 0)
+    close_price = ohlc.get("close", 0)
+    high_price = ohlc.get("high", 0)
+    low_price = ohlc.get("low", 0)
+    volume = ohlc.get("vol", 0)
+    amount = ohlc.get("amount", 0)
+    
+    # Tính biến động (thân nến) và biên độ (cả râu)
+    if open_price > 0:
+        change_pct = (close_price - open_price) / open_price * 100
+    else:
+        change_pct = 0
+    
+    if low_price > 0:
+        range_pct = (high_price - low_price) / low_price * 100
+    else:
+        range_pct = 0
+    
+    abs_change = abs(change_pct)
+    color = "🟢" if change_pct >= 0 else "🔴"
+    
+    # Xác định loại alert dựa trên cả biến động và biên độ
+    max_signal = max(abs_change, range_pct)
+    
+    if change_pct >= OHLC_ALERT_THRESHOLD:
+        icon = "🚀🚀🚀"
+        action = "PUMP MẠNH"
+    elif change_pct <= -OHLC_ALERT_THRESHOLD:
+        icon = "💥💥💥"
+        action = "DUMP MẠNH"
+    elif range_pct >= OHLC_ALERT_THRESHOLD:
+        # Biên độ lớn nhưng thân nến nhỏ = có rút râu
+        if change_pct >= 0:
+            icon = "📈⚡"
+            action = "PUMP + RÚT RÂU"
+        else:
+            icon = "📉⚡"
+            action = "DUMP + RÚT RÂU"
+    else:
+        icon = "⚠️"
+        action = "BIẾN ĐỘNG"
+    
+    coin = symbol.replace("_USDT", "")
+    link = f"https://www.mexc.co/futures/{symbol}"
+    
+    # Thêm warning nếu có rút râu mạnh
+    wick_warning = ""
+    if range_pct > abs_change * 2 and range_pct >= 5:
+        wick_warning = " ⚠️RÂU DÀI"
+    
+    return (
+        f"┌{icon} *{action}*: [{coin}]({link})\n"
+        f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
+        f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
+        f"├ Biến động: {change_pct:+.2f}% {color} (thân nến)\n"
+        f"├ Biên độ: {range_pct:.2f}%{wick_warning} (cả râu)\n"
+        f"└ KL: {volume:,.0f} | Vol: {amount:,.2f} USDT"
+    )
 
 # ================== ADMIN CHECK DECORATOR ==================
 def admin_only(func):
@@ -516,6 +586,104 @@ async def cmd_coinlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== WEBSOCKET & PUMP/DUMP LOGIC ==================
+async def process_kline(bot, kline_data: dict):
+    """Xử lý dữ liệu Kline (OHLC) và gửi alert nếu biến động/biên độ >= ngưỡng."""
+    symbol = kline_data.get("symbol")
+    if not symbol:
+        return
+    
+    try:
+        # Parse OHLC data
+        open_price = float(kline_data.get("o", 0))
+        high_price = float(kline_data.get("h", 0))
+        low_price = float(kline_data.get("l", 0))
+        close_price = float(kline_data.get("c", 0))
+        volume = float(kline_data.get("v", 0))
+        amount = float(kline_data.get("a", 0))
+        
+        if open_price <= 0 or low_price <= 0:
+            return
+        
+        # Lưu OHLC data
+        now = datetime.now()
+        OHLC_DATA[symbol] = {
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "vol": volume,
+            "amount": amount,
+            "time": now
+        }
+        
+        # Tính biến động (thân nến) và biên độ (cả râu)
+        change_pct = (close_price - open_price) / open_price * 100
+        range_pct = (high_price - low_price) / low_price * 100
+        
+        abs_change = abs(change_pct)
+        
+        # Check xem có đủ điều kiện alert không
+        should_alert = abs_change >= OHLC_ALERT_THRESHOLD or range_pct >= OHLC_ALERT_THRESHOLD
+        
+        if not should_alert:
+            return
+        
+        # Check cooldown để tránh spam
+        if symbol in OHLC_LAST_ALERT:
+            elapsed = (now - OHLC_LAST_ALERT[symbol]).total_seconds()
+            if elapsed < OHLC_COOLDOWN_SECONDS:
+                return
+        
+        # Cập nhật thời điểm alert
+        OHLC_LAST_ALERT[symbol] = now
+        
+        # Format và gửi alert
+        msg = fmt_ohlc_alert(symbol, OHLC_DATA[symbol])
+        
+        signal_type = "BIÊN ĐỘ" if range_pct > abs_change else "BIẾN ĐỘNG"
+        max_pct = max(abs_change, range_pct)
+        print(f"📊 OHLC ALERT {symbol}: {signal_type} {max_pct:.2f}% (change={change_pct:+.2f}%, range={range_pct:.2f}%)")
+        
+        tasks = []
+        
+        # Gửi vào channel nếu có
+        if CHANNEL_ID:
+            tasks.append(
+                bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
+            )
+        
+        # Gửi cho subscribers
+        for chat_id in list(SUBSCRIBERS):
+            if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
+                continue
+            
+            mode = ALERT_MODE.get(chat_id, 1)
+            # Mode 2: chỉ 3–5% - bỏ qua OHLC alert (vì OHLC chỉ báo >= 10%)
+            if mode == 2:
+                continue
+            # Mode 3: chỉ ≥10% - phù hợp với OHLC alert
+            
+            tasks.append(
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
+            )
+        
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    
+    except Exception as e:
+        print(f"❌ Error processing kline for {symbol}: {e}")
+
+
 async def process_ticker(bot, ticker_data: dict):
     """Xử lý 1 gói ticker và gửi alert nếu vượt ngưỡng (không hạn chế lặp)."""
     symbol = ticker_data.get("symbol")
@@ -752,16 +920,24 @@ async def websocket_stream(application: Application):
                 print("✅ Kết nối WebSocket thành công")
                 reconnect_delay = 5
 
-                # Subscribe tất cả symbol hiện có
+                # Subscribe tất cả symbol hiện có (cả ticker và kline)
                 for sym in ALL_SYMBOLS:
-                    sub_msg = {
+                    # Subscribe ticker
+                    sub_ticker = {
                         "method": "sub.ticker",
                         "param": {"symbol": sym},
                     }
-                    await ws.send(json.dumps(sub_msg))
+                    await ws.send(json.dumps(sub_ticker))
+                    
+                    # Subscribe kline (nến 1 phút)
+                    sub_kline = {
+                        "method": "sub.kline",
+                        "param": {"symbol": sym, "interval": KLINE_INTERVAL},
+                    }
+                    await ws.send(json.dumps(sub_kline))
                     await asyncio.sleep(0.005)
 
-                print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin futures")
+                print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin (ticker + kline {KLINE_INTERVAL})")
 
                 # Vòng lặp nhận dữ liệu
                 async for message in ws:
@@ -778,6 +954,10 @@ async def websocket_stream(application: Application):
                     # Ticker data
                     if data.get("channel") == "push.ticker" and "data" in data:
                         await process_ticker(application.bot, data["data"])
+                    
+                    # Kline data (OHLC)
+                    if data.get("channel") == "push.kline" and "data" in data:
+                        await process_kline(application.bot, data["data"])
 
                     # SAU KHI XỬ LÝ TICKER → CHECK XEM CÓ COIN MỚI CẦN SUB KHÔNG
                     if WS_SUB_QUEUE is not None:
@@ -791,13 +971,18 @@ async def websocket_stream(application: Application):
                             if new_sym not in ALL_SYMBOLS:
                                 ALL_SYMBOLS.append(new_sym)
 
-                            sub_msg = {
+                            sub_ticker = {
                                 "method": "sub.ticker",
                                 "param": {"symbol": new_sym},
                             }
+                            sub_kline = {
+                                "method": "sub.kline",
+                                "param": {"symbol": new_sym, "interval": KLINE_INTERVAL},
+                            }
                             try:
-                                await ws.send(json.dumps(sub_msg))
-                                print(f"📡 Đã subscribe thêm coin mới: {new_sym}")
+                                await ws.send(json.dumps(sub_ticker))
+                                await ws.send(json.dumps(sub_kline))
+                                print(f"📡 Đã subscribe thêm coin mới: {new_sym} (ticker + kline)")
                             except Exception as e:
                                 print(f"⚠️ Lỗi khi subscribe thêm {new_sym}: {e}")
                                 # nếu lỗi, cho vào queue lại để thử ở vòng sau
