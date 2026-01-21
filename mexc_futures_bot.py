@@ -40,8 +40,8 @@ EXTREME_THRESHOLD = 10.0  # >=10% = biến động cực mạnh
 
 # ================== OHLC/KLINE CONFIG ==================
 KLINE_INTERVAL = "Min1"           # Timeframe nến 1 phút
-OHLC_ALERT_THRESHOLD = 10.0       # Ngưỡng biến động/biên độ để alert OHLC (%)
-OHLC_COOLDOWN_SECONDS = 60        # Cooldown giữa các alert OHLC cho cùng 1 symbol
+OHLC_ALERT_THRESHOLD = 3.0        # Ngưỡng biến động/biên độ để alert OHLC (%) - ĐÃ GIẢM TỪ 10% XUỐNG 3%
+OHLC_COOLDOWN_SECONDS = 30        # Cooldown giữa các alert OHLC cho cùng 1 symbol - GIẢM TỪ 60s XUỐNG 30s
 
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
@@ -741,9 +741,18 @@ async def process_ticker(bot, ticker_data: dict):
             BASE_PRICES[symbol] = current_price
             MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
 
-        # kiểm tra có nên alert không
-        if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
-            return
+        # CHẾ DÙNG OHLC ĐỂ ALERT - TẮT TICKER ALERTS (THỬ NGHIỆM)
+        # kiểm tra có nên alert không - SKIP, chỉ track price
+        # if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
+        #     return
+        
+        # Không gửi alert từ ticker - chỉ log và track
+        if price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD:
+            if price_change >= PUMP_THRESHOLD:
+                print(f"📊 TICKER TRACK {symbol}: +{price_change:.2f}% (chờ OHLC alert)")
+            else:
+                print(f"📊 TICKER TRACK {symbol}: {price_change:.2f}% (chờ OHLC alert)")
+        return  # Không gửi alert từ ticker - chỉ dùng OHLC
 
         # lưu lại thời điểm alert để job reset base dùng
         ALERTED_SYMBOLS[symbol] = now
