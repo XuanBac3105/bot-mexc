@@ -313,23 +313,16 @@ def fmt_ohlc_alert(symbol: str, ohlc: dict) -> str:
     
     # Format khác nhau cho EXTREME vs NORMAL
     if is_extreme:
+        # EXTREME: Format 1 dòng nổi bật, dễ scan
         return (
-            f"{'='*20}\n"
-            f"┌{icon} *{action}*\n"
-            f"├ 🪙 [{coin}]({link})\n"
-            f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
-            f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
-            f"├ *Biến động: {change_pct:+.2f}%* {color}\n"
-            f"└ *Biên độ: {range_pct:.2f}%*{wick_warning}\n"
-            f"{'='*20}"
+            f"{icon} *[{coin}]({link})* {color} "
+            f"*{change_pct:+.1f}%* (biên độ {range_pct:.1f}%){wick_warning}"
         )
     else:
+        # NORMAL: Format 2 dòng compact
         return (
-            f"┌{icon} *{action}*: [{coin}]({link})\n"
-            f"├ Mở: {open_price:.6g} → Đóng: {close_price:.6g}\n"
-            f"├ Cao: {high_price:.6g} | Thấp: {low_price:.6g}\n"
-            f"├ Biến động: {change_pct:+.2f}% {color} (thân nến)\n"
-            f"└ Biên độ: {range_pct:.2f}%{wick_warning} (cả râu)"
+            f"{icon} *[{coin}]({link})* {color}\n"
+            f"{change_pct:+.1f}% • Biên độ {range_pct:.1f}%{wick_warning}"
         )
 
 # ================== ADMIN CHECK DECORATOR ==================
