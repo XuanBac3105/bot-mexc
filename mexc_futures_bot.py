@@ -779,33 +779,48 @@ async def process_ticker(bot, ticker_data: dict):
             BASE_PRICES[symbol] = current_price
             MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
 
-        # CHẾ DÙNG OHLC ĐỂ ALERT - TẮT TICKER ALERTS (THỬ NGHIỆM)
-        # kiểm tra có nên alert không - SKIP, chỉ track price
-        # if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
-        #     return
+        # =============== HYBRID: TICKER TRIGGER + OHLC DISPLAY ===============
+        # Ticker phát hiện nhanh, OHLC cung cấp % chính xác
         
-        # Không gửi alert từ ticker - chỉ log và track
-        if price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD:
-            if price_change >= PUMP_THRESHOLD:
-                print(f"📊 TICKER TRACK {symbol}: +{price_change:.2f}% (chờ OHLC alert)")
+        # Kiểm tra có vượt ngưỡng không (dùng ticker để trigger nhanh)
+        if not (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
+            return
+        
+        # Check cooldown để tránh spam (dùng chung với OHLC)
+        if symbol in OHLC_LAST_ALERT:
+            elapsed = (now - OHLC_LAST_ALERT[symbol]).total_seconds()
+            if elapsed < OHLC_COOLDOWN_SECONDS:
+                return
+        
+        # Lấy OHLC data nếu có để tính % chính xác
+        if symbol in OHLC_DATA:
+            ohlc = OHLC_DATA[symbol]
+            # Dùng OHLC để format alert với % chính xác
+            msg = fmt_ohlc_alert(symbol, ohlc)
+            
+            # Tính max signal từ OHLC
+            open_p = ohlc.get("open", 0)
+            close_p = ohlc.get("close", 0)
+            high_p = ohlc.get("high", 0)
+            low_p = ohlc.get("low", 0)
+            
+            if open_p > 0 and low_p > 0:
+                ohlc_change = (close_p - open_p) / open_p * 100
+                ohlc_range = (high_p - low_p) / low_p * 100
+                max_signal = max(abs(ohlc_change), ohlc_range)
+                print(f"⚡ TICKER+OHLC {symbol}: ticker={price_change:+.2f}% | ohlc_change={ohlc_change:+.2f}% | range={ohlc_range:.2f}%")
             else:
-                print(f"📊 TICKER TRACK {symbol}: {price_change:.2f}% (chờ OHLC alert)")
-        return  # Không gửi alert từ ticker - chỉ dùng OHLC
-
-        # lưu lại thời điểm alert để job reset base dùng
-        ALERTED_SYMBOLS[symbol] = now
-        
-        # =============== TRACK PUMP/DUMP START TIME ===============
-        # Nếu là lần đầu tiên vượt ngưỡng, lưu thời điểm bắt đầu
-        if symbol not in PUMP_DUMP_START_TIME:
-            PUMP_DUMP_START_TIME[symbol] = now
-            print(f"⏱️ Tracking candle close cho {symbol} từ {now.strftime('%H:%M:%S')}")
-
-        msg = fmt_alert(symbol, base_price, current_price, price_change)
-        if price_change >= PUMP_THRESHOLD:
-            print(f"🚀 PUMP {symbol}: {price_change:+.2f}% (max {MAX_CHANGES[symbol]['max_pct']:+.2f}%)")
+                max_signal = abs_change
+                ohlc_change = price_change
         else:
-            print(f"💥 DUMP {symbol}: {price_change:+.2f}% (max {MAX_CHANGES[symbol]['max_pct']:+.2f}%)")
+            # Fallback: không có OHLC thì dùng ticker (ít chính xác hơn)
+            msg = fmt_alert(symbol, base_price, current_price, price_change)
+            max_signal = abs_change
+            ohlc_change = price_change
+            print(f"⚡ TICKER ONLY {symbol}: {price_change:+.2f}% (no OHLC data)")
+        
+        # Cập nhật cooldown
+        OHLC_LAST_ALERT[symbol] = now
 
         # gửi vào channel nếu có
         tasks = []
@@ -820,17 +835,17 @@ async def process_ticker(bot, ticker_data: dict):
                 )
             )
 
-        # gửi cho subscribers riêng (KHÔNG chặn lặp – mỗi lần tick mà đủ % là gửi)
+        # gửi cho subscribers với mode filtering dựa trên max_signal từ OHLC
         for chat_id in list(SUBSCRIBERS):
             if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
                 continue
 
             mode = ALERT_MODE.get(chat_id, 1)
-            # Mode 2: chỉ 3–5%
-            if mode == 2 and not (PUMP_THRESHOLD <= abs_change <= MODERATE_MAX):
+            # Mode 2: chỉ 3–5% - skip nếu max_signal >= 10%
+            if mode == 2 and max_signal >= EXTREME_THRESHOLD:
                 continue
-            # Mode 3: chỉ ≥10%
-            if mode == 3 and abs_change < EXTREME_THRESHOLD:
+            # Mode 3: chỉ ≥10% - skip nếu max_signal < 10%
+            if mode == 3 and max_signal < EXTREME_THRESHOLD:
                 continue
 
             tasks.append(
@@ -841,99 +856,9 @@ async def process_ticker(bot, ticker_data: dict):
                     disable_web_page_preview=True,
                 )
             )
-
-        # =============== CHECK 3-TIER COUNTDOWN ALERTS ===============
-        # Báo 3 mốc: 60s (bắt đầu), 15s (chuẩn bị), 0s (kết quả)
-        if symbol in PUMP_DUMP_START_TIME:
-            elapsed = (now - PUMP_DUMP_START_TIME[symbol]).total_seconds()
-            seconds_to_close = CANDLE_INTERVAL_SECONDS - elapsed
-            
-            # Khởi tạo tracking cho symbol nếu chưa có
-            if symbol not in CANDLE_ALERTS_SENT:
-                CANDLE_ALERTS_SENT[symbol] = set()
-            
-            countdown_tasks = []
-            milestone = None
-            countdown_msg = None
-            
-            # Mốc 60s: Báo bắt đầu tracking (0-3s)
-            if 0 <= elapsed <= 3 and "60s" not in CANDLE_ALERTS_SENT[symbol]:
-                milestone = "60s"
-                countdown_msg = fmt_countdown_alert(
-                    symbol, milestone, price_change, 
-                    MAX_CHANGES[symbol]['max_pct'], int(seconds_to_close)
-                )
-                CANDLE_ALERTS_SENT[symbol].add("60s")
-                print(f"🔥 60s ALERT {symbol}: Bắt đầu tracking! {seconds_to_close:.1f}s còn lại")
-            
-            # Mốc 15s: Alert sắp đóng (43-47s elapsed = 13-17s còn lại)
-            elif 43 <= elapsed <= 47 and "15s" not in CANDLE_ALERTS_SENT[symbol]:
-                milestone = "15s"
-                countdown_msg = fmt_countdown_alert(
-                    symbol, milestone, price_change,
-                    MAX_CHANGES[symbol]['max_pct'], int(seconds_to_close)
-                )
-                CANDLE_ALERTS_SENT[symbol].add("15s")
-                print(f"⚡ 15s ALERT {symbol}: Nến sắp đóng! {seconds_to_close:.1f}s còn lại")
-            
-            # Mốc 0s: Kết quả cuối cùng (58-62s elapsed)
-            elif 58 <= elapsed <= 62 and "0s" not in CANDLE_ALERTS_SENT[symbol]:
-                milestone = "0s"
-                countdown_msg = fmt_countdown_alert(
-                    symbol, milestone, price_change,
-                    MAX_CHANGES[symbol]['max_pct'], 0
-                )
-                CANDLE_ALERTS_SENT[symbol].add("0s")
-                print(f"✅ 0s ALERT {symbol}: Nến đã đóng! Kết quả: {price_change:+.2f}%")
-            
-            # Gửi countdown alert nếu có
-            if countdown_msg:
-                if CHANNEL_ID:
-                    countdown_tasks.append(
-                        bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=countdown_msg,
-                            parse_mode=ParseMode.MARKDOWN,
-                            disable_web_page_preview=True,
-                        )
-                    )
-                
-                for chat_id in list(SUBSCRIBERS):
-                    if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
-                        continue
-                    
-                    mode = ALERT_MODE.get(chat_id, 1)
-                    if mode == 2 and not (PUMP_THRESHOLD <= abs_change <= MODERATE_MAX):
-                        continue
-                    if mode == 3 and abs_change < EXTREME_THRESHOLD:
-                        continue
-                    
-                    countdown_tasks.append(
-                        bot.send_message(
-                            chat_id=chat_id,
-                            text=countdown_msg,
-                            parse_mode=ParseMode.MARKDOWN,
-                            disable_web_page_preview=True,
-                        )
-                    )
-                
-                if countdown_tasks:
-                    await asyncio.gather(*countdown_tasks, return_exceptions=True)
-            
-            # Reset tracking nếu candle đã đóng (sau 65s để chắc chắn)
-            if elapsed >= 65:
-                PUMP_DUMP_START_TIME.pop(symbol, None)
-                CANDLE_ALERTS_SENT.pop(symbol, None)
-                print(f"🔄 Reset candle tracking cho {symbol}")
-
+        
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-
-            # nếu biến động cực mạnh thì reset base ngay
-            if abs_change >= EXTREME_THRESHOLD:
-                BASE_PRICES[symbol] = current_price
-                MAX_CHANGES[symbol] = {"max_pct": 0.0, "time": now}
-                print(f"🔁 Reset base price cho {symbol} sau alert cực mạnh {abs_change:.2f}%")
 
     except Exception as e:
         print(f"❌ Error processing ticker for {symbol}: {e}")
