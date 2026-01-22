@@ -315,13 +315,13 @@ def fmt_ohlc_alert(symbol: str, ohlc: dict) -> str:
     if is_extreme:
         # EXTREME: Format 1 dòng nổi bật, dễ scan
         return (
-            f"{icon} *[{coin}]({link})* {color} "
+            f"{icon} [{coin}]({link}) {color} "
             f"*{change_pct:+.1f}%* (biên độ {range_pct:.1f}%){wick_warning}"
         )
     else:
         # NORMAL: Format 2 dòng compact
         return (
-            f"{icon} *[{coin}]({link})* {color}\n"
+            f"{icon} [{coin}]({link}) {color}\n"
             f"{change_pct:+.1f}% • Biên độ {range_pct:.1f}%{wick_warning}"
         )
 
